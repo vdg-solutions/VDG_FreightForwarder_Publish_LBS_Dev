@@ -195,6 +195,7 @@
   "sales_new.validation.no_lines": "Cần ít nhất 1 dòng P&L có số tiền > 0",
   "sales_new.warn.pnl_lines_missing": "Dữ liệu P&L chưa đầy đủ — kiểm tra lại",
   "sales_new.validation.override_incomplete": "Override cần nhập số tiền và người nhận",
+  "sales_new.validation.rep_not_account": "Sales phụ trách phải là tài khoản đăng nhập — chọn lại từ danh sách",
   "sales_new.validation.line_currency_required": "Mỗi dòng P&L có số tiền phải có tiền tệ",
   "sales_new.validation.line_fx_required": "Mỗi dòng P&L ngoại tệ có số tiền phải có tỷ giá",
   "sales_new.validation.line_fx_no_rate_hint": "Dòng ngoại tệ chưa có tỷ giá — nhập tỷ giá, hoặc thêm ở màn Tỷ giá (Admin) nếu chưa có",

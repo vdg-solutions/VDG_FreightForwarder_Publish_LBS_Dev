@@ -195,6 +195,7 @@
   "sales_new.validation.no_lines": "At least 1 P&L line with an amount > 0 is required",
   "sales_new.warn.pnl_lines_missing": "P&L data incomplete — please check",
   "sales_new.validation.override_incomplete": "Override requires amount and recipient",
+  "sales_new.validation.rep_not_account": "The sales rep must be a sign-in account — pick one from the list",
   "sales_new.validation.line_currency_required": "Every P&L line with an amount must have a currency",
   "sales_new.validation.line_fx_required": "Every non-VND P&L line with an amount must have an FX rate",
   "sales_new.validation.line_fx_no_rate_hint": "No rate found for this currency — enter a rate, or add one on the FX Rates (Admin) screen",
