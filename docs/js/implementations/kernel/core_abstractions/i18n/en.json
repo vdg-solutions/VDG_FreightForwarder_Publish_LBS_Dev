@@ -2078,7 +2078,6 @@
   "settings.default_currency.locked_in_period": "This period already carries {n} job(s) — the default currency is frozen until the next one",
   "settings.default_currency.locked_closed": "The period is closed — it takes no policy changes",
   "shipment.revenue.rep_not_account_error": "Shipment {shipment} names “{rep}” as its sales rep, which is a name and not an account, so the revenue cannot be saved. Pick the rep from the list again and save.",
-  "shipment.revenue.foreign_rep_error": "Revenue for {shipment} belongs to {rep} — this build cannot save another rep's revenue yet. Nothing was lost; {rep} needs to enter it.",
   "sales_new.cargo.title": "Cargo Items",
   "sales_new.cargo.add_item": "Add Item",
   "sales_new.cargo.col_desc": "Commodity Description",

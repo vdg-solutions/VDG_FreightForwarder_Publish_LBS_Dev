@@ -73,7 +73,7 @@ export async function render(root, opts = {}) {
   // F-41-01: the job's rep is DERIVED — explicit ?sales= (on-behalf / the quote-convert door)
   // wins, else the signed-in session but ONLY when it actually holds a sales role. The old
   // unconditional `currentAccount()` default is the bug this feature exists to remove: a job
-  // CS opened was attributed to the CS account, so its revenue fork, publish fork and Job No
+  // CS opened was attributed to the CS account, so its revenue rows, its published billing and its Job No
   // namespace all pointed at the wrong person. '' here means the form must be given a rep —
   // the customer master autofills one, or the select asks.
   const routeRep   = (salesId && salesId !== 'me') ? salesId : null;
