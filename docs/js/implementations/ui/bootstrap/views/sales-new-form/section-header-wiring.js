@@ -1,0 +1,324 @@
+// section-header-wiring.js — Section A behaviour: DOM listeners, mode toggle, chargeable weight,
+// customer→rep autofill. Split out of section-header.js at the markup/behaviour seam when that
+// file crossed the 350-line cap (F-41-01/02 added the rep select and quote picker). The markup
+// builders and the field primitives other sections import stay in section-header.js.
+
+import { t } from '../../../../kernel/core_abstractions/i18n/index.js';
+import { classifyDocument } from '../sales-new/doc-auto-detect.js';
+import { loadWasm } from '../../../core_abstractions/ports/wasm-loader.js';
+import { computeChargeableKg } from '../../../core_abstractions/ports/flows/air-rate-calculator.js';
+import { listCustomerMasters, createCustomerDraft } from '../../../core_abstractions/ports/data/sales-reads.js';
+import { customerRepFor } from '../../../core_abstractions/ports/flows/sales-rep-derivation.js';
+import { directionFromProduct } from './section-header.js';
+
+// F-41-07: keep the direction control honest about who decided. A product that names the
+// direction fills it and locks it (submitting through a hidden twin, since a disabled select
+// sends nothing); a product that cannot name it hands the choice back to the user.
+function _applyDirection(root) {
+  const sel = root.querySelector('[name=direction], [name=direction_display]');
+  if (!sel) return;
+  const settled = directionFromProduct(root.querySelector('[name=product]')?.value || '');
+  let mirror = root.querySelector('input[type=hidden][name=direction]');
+  if (settled) {
+    sel.value = settled;
+    sel.disabled = true;
+    sel.name = 'direction_display';
+    sel.classList.add('bg-slate-50');
+    if (!mirror) {
+      mirror = document.createElement('input');
+      mirror.type = 'hidden';
+      mirror.name = 'direction';
+      sel.after(mirror);
+    }
+    mirror.value = settled;
+  } else {
+    mirror?.remove();
+    sel.disabled = false;
+    sel.name = 'direction';
+    sel.classList.remove('bg-slate-50');
+  }
+}
+
+// apply mode: toggle sea-only / air-only field visibility
+function _applyMode(root, mode) {
+  const isAir = mode === 'AIR';
+  root.querySelectorAll('[data-sea-only]').forEach((el) => {
+    el.classList.toggle('hidden', isAir);
+  });
+  root.querySelectorAll('[data-air-only]').forEach((el) => {
+    el.classList.toggle('hidden', !isAir);
+  });
+}
+
+// weight_actual is entered in whatever unit weight_uom names, but compute_chargeable_kg (and
+// every rate-card lookup downstream of it) is kg-only — converted here, once, before the wasm
+// call, so a LB actual never gets read as if it were already kg. LB is the only non-kg unit the
+// registry seeds today; an exact international pound (kept as a named constant, not inline).
+const LB_TO_KG = 0.45359237;
+/// How many masters the dropdown offers before anything is typed, and how many hits the index
+/// returns for a query — one list length, so the box does not change height as you type.
+// Was 5, against a customer list of 10+: a newly added account simply was not among the first
+// five and the picker said nothing, so it read as "my customer is missing". A cap is still needed
+// (the list grows unbounded), but it has to SAY it is capping -- see renderDropdown's overflow
+// row. 20 is what fits the panel without scrolling on the shortest supported viewport.
+const EMPTY_QUERY_SUGGESTIONS = 20;
+function _toKg(value, uom) {
+  return uom === 'LB' ? value * LB_TO_KG : value;
+}
+
+// recompute + display chargeable weight from air inputs
+function _updateChargeable(root) {
+  const n = (name) => parseFloat(root.querySelector(`[name=${name}]`)?.value) || 0;
+  const actualUom = root.querySelector('[name=weight_uom]')?.value;
+  const actualKg  = _toKg(n('weight_actual'), actualUom);
+  const kg = computeChargeableKg(actualKg, n('dim_l_cm'), n('dim_w_cm'), n('dim_h_cm'));
+  const el = root.querySelector('[name=chargeable_kg]');
+  if (el) el.value = kg;
+}
+
+// Wires MBL → doc-type badge; mode toggle; chargeable weight; calls onChanged on any Section A input
+export function wireHeaderSection(root, onChanged) {
+  const mblEl  = root.querySelector('[name=mbl]');
+  const modeEl = root.querySelector('[name=mode]');
+  const badge  = root.querySelector('#doc-type-badge');
+
+  root.querySelector('[name=product]')?.addEventListener('change', () => {
+    _applyDirection(root);
+    onChanged?.();
+  });
+
+  const updateBadge = () => {
+    const res = classifyDocument(mblEl?.value || '');
+    if (res.confidence !== 'Low' && res.docType) {
+      if (badge) { badge.textContent = res.docType; badge.classList.remove('hidden'); }
+    } else if (badge) {
+      badge.classList.add('hidden');
+    }
+  };
+
+  mblEl?.addEventListener('input', () => { updateBadge(); onChanged?.(); });
+  mblEl?.addEventListener('paste', () => setTimeout(() => { updateBadge(); onChanged?.(); }, 0));
+
+  modeEl?.addEventListener('change', () => {
+    _applyMode(root, modeEl.value);
+    // The pairing rule lives in wasm (rulesets::shipment_publish_gate::product_for_mode) and used
+    // to run in one direction only: the gate REPORTED mode_product_conflict and left the operator
+    // to go fix it. Read forwards it sets the product the mode determines. `null` means leave the
+    // field as they set it -- SEA has three products and choosing one for them would put a value
+    // nobody typed onto a document.
+    const productEl = root.querySelector('[name=product]');
+    const derived = window.__vdg_wasm?.shipment_product_for_mode?.(modeEl.value || '', productEl?.value || '');
+    if (productEl && derived !== null && derived !== undefined && productEl.value !== derived) {
+      productEl.value = derived;
+      productEl.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    onChanged?.();
+  });
+  const hblChk = root.querySelector('[name=has_hbl]'); // F-32-01 DEFECT-02: HBL/D-O display toggle
+  hblChk?.addEventListener('change', () => {
+    const on = hblChk.checked, disp = root.querySelector('[name=hbl_do_display]');
+    root.querySelectorAll('[data-hbl-do-row]').forEach((el) => el.classList.toggle('hidden', !on));
+    if (disp) disp.value = on ? (root.querySelector('[name=job_no]')?.value || '') : '';
+  });
+
+  const airFields = ['weight_actual', 'dim_l_cm', 'dim_w_cm', 'dim_h_cm'];
+  airFields.forEach((name) => {
+    root.querySelector(`[name=${name}]`)?.addEventListener('input', () => {
+      _updateChargeable(root);
+      onChanged?.();
+    });
+  });
+  // weight_uom is a <select>, not an air-field text/number input — changing the unit alone (no
+  // change in the typed number) still has to re-run the conversion the chargeable weight depends on.
+  root.querySelector('[name=weight_uom]')?.addEventListener('change', () => {
+    _updateChargeable(root);
+    onChanged?.();
+  });
+
+  root.querySelector('#sec-a-body')?.querySelectorAll('input,select').forEach((el) => {
+    if (el !== mblEl && el !== modeEl && !airFields.includes(el.name) && el.name !== 'weight_uom' && el.id !== 'customer-search-input') {
+      el.addEventListener('input', onChanged);
+      el.addEventListener('change', onChanged);
+    }
+  });
+
+  // F-41-01: picking a customer fills the rep select from the customer master — only when no rep
+  // is chosen yet, and only with a prefix the select actually offers. Dispatches 'change' so the
+  // Job No preview re-mints under the filled rep.
+  async function _autofillRep(customerName) {
+    const sel = root.querySelector('select[name=sales_rep]');
+    if (!sel || sel.value) return;
+    try {
+      const list = window.__vdg_repo ? await listCustomerMasters() : [];
+      const rep  = customerRepFor(customerName, list);
+      if (rep && [...sel.options].some((o) => o.value === rep)) {
+        sel.value = rep;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    } catch { /* autofill is best-effort — the select stays for a manual pick */ }
+  }
+
+  // Wire Customer BM25 Search
+  const custInput = root.querySelector('#customer-search-input');
+  const custHidden = root.querySelector('[name=customer]');
+  const custDropdown = root.querySelector('#customer-search-dropdown');
+  let cIndex = null;
+  const initCIndex = async () => {
+      if (cIndex) return;
+      const wasm = await loadWasm();
+      if (!wasm) return;
+      cIndex = new wasm.CustomerIndex();
+      // The index is built from the customer masters; sectionAHtml receives them too but this
+      // wiring is mounted without them, so it asks for the same set by name.
+      try {
+          if (window.__vdg_repo) {
+              for (const c of await listCustomerMasters()) {
+                  if (c.name) {
+                      cIndex.add_customer(JSON.stringify({ id: c.name, name: c.name }));
+                  }
+              }
+          }
+      } catch (e) { console.warn('Failed to load customers into index', e); } // DEV
+  };
+
+  let searchTimeout = null;
+
+  const renderDropdown = (results, query) => {
+      custDropdown.innerHTML = '';
+      if (results.length > 0) {
+          results.forEach(r => {
+              if (r._more) {
+                  const hint = document.createElement('div');
+                  hint.className = 'px-3 py-2 text-xs text-slate-500 italic';
+                  hint.textContent = t('sales_new.customer_more').replace('{n}', String(r._more));
+                  custDropdown.appendChild(hint);
+                  return;
+              }
+              const div = document.createElement('div');
+              div.className = 'px-3 py-2 hover:bg-blue-50 cursor-pointer flex justify-between items-center border-b border-slate-100';
+              const scoreHtml = r.score !== undefined ? `<span class="text-[9px] text-slate-400">${t('common.score_label')} ${(r.score).toFixed(2)}</span>` : '';
+              div.innerHTML = `<span class="font-medium">${r.name}</span>${scoreHtml}`;
+              div.addEventListener('click', () => {
+                  custInput.value = r.name;
+                  custHidden.value = r.name;
+                  custDropdown.classList.add('hidden');
+                  _autofillRep(r.name);
+                  onChanged?.();
+              });
+              custDropdown.appendChild(div);
+          });
+      } else {
+          custDropdown.innerHTML = `<div class="px-3 py-2 text-slate-400 italic">Không tìm thấy khách hàng.</div>`;
+      }
+      
+      if (query) {
+          const createBtn = document.createElement('div');
+          createBtn.className = 'px-3 py-2 bg-slate-50 hover:bg-slate-100 cursor-pointer text-blue-600 font-medium text-center sticky bottom-0 border-t border-slate-200';
+          createBtn.textContent = '+ Tạo nhanh: "' + query + '"';
+          createBtn.addEventListener('click', async () => {
+              if (!window.__vdg_repo) return;
+              try {
+                  // The id scheme, and the dedupe that stops an index miss from splitting one
+                  // customer across two masters, are the use-case's. The name that comes back is
+                  // the one the field must carry — a deduped create answers with the master that
+                  // already held it, not with what was typed.
+                  const { created, record } = await createCustomerDraft(query);
+                  const name = record?.name || query;
+                  custInput.value = name;
+                  custHidden.value = name;
+                  custDropdown.classList.add('hidden');
+                  if (cIndex) cIndex.add_customer(JSON.stringify({ id: name, name }));
+                  onChanged?.();
+                  const message = created ? t('sales_new.customer_quick_created') : t('sales_new.customer_already_known');
+                  window.dispatchEvent(new CustomEvent('vdg:toast', { detail: { message, type: 'success' } }));
+              } catch(err) {
+                  console.error(err); // DEV
+              }
+          });
+          custDropdown.appendChild(createBtn);
+      }
+      
+      custDropdown.classList.remove('hidden');
+  };
+
+  const doSearch = (query, isAutofillCheck = false) => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(async () => {
+          if (!query) {
+              let results = [];
+              if (window.__vdg_repo) {
+                  // F-43-08 was this screen guessing at the kind and guessing wrong; it asks for
+                  // the masters by name now and cannot guess.
+                  try {
+                      const list = await listCustomerMasters() || [];
+                      results = list.slice(0, EMPTY_QUERY_SUGGESTIONS).map(c => ({ name: c.name }));
+                      // Silent truncation is what made this read as data loss. If the list is
+                      // longer than the cap, say so instead of showing a prefix as if it were all.
+                      if (list.length > results.length) {
+                        results.push({ name: '', _more: list.length - results.length });
+                      }
+                  } catch (e) { console.warn('Failed to list customers', e); } // DEV
+              }
+              renderDropdown(results, query);
+              return;
+          }
+          await initCIndex();
+          let resultsJson = '[]';
+          if (cIndex) {
+              resultsJson = cIndex.search(query, EMPTY_QUERY_SUGGESTIONS);
+          }
+          const results = JSON.parse(resultsJson);
+
+          if (isAutofillCheck) {
+              // BM25 scores are unbounded and depend on corpus size/term rarity, so a fixed
+              // magnitude (the old 0.95 cosine-similarity cutoff) has no honest meaning against
+              // them. "Confident" here means the top hit's name folds to the same normalized
+              // text as what was typed (case/whitespace/punctuation aside) — a near-duplicate of
+              // an exact match, not a plain relevance match.
+              const normalize = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+              const exactMatch = results.find(r => r.name.toLowerCase() === query.toLowerCase());
+              const normalizedMatch = !exactMatch && results.length > 0 && normalize(results[0].name) === normalize(query);
+              if (exactMatch || normalizedMatch) {
+                  const bestName = exactMatch ? exactMatch.name : results[0].name;
+                  custInput.value = bestName;
+                  custHidden.value = bestName;
+                  custInput.classList.remove('border-amber-400', 'bg-amber-50');
+                  custDropdown.classList.add('hidden');
+                  onChanged?.();
+                  return;
+              } else {
+                  // Not exact match, show amber warning and open dropdown
+                  custInput.classList.add('border-amber-400', 'bg-amber-50');
+              }
+          } else {
+              custInput.classList.remove('border-amber-400', 'bg-amber-50');
+          }
+          
+          renderDropdown(results, query);
+      }, 100);
+  };
+
+  custInput?.addEventListener('input', (e) => {
+      const query = e.target.value.trim();
+      custHidden.value = query; // keep it in sync for raw typing
+      onChanged?.();
+      doSearch(query);
+  });
+  
+  custInput?.addEventListener('focus', (e) => {
+      const query = e.target.value.trim();
+      doSearch(query);
+  });
+  
+  // Trigger autofill check
+  if (custInput?.hasAttribute('data-autofilled') && custInput.value.trim()) {
+      doSearch(custInput.value.trim(), true);
+  }
+  
+  // Hide dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+      if (!custInput?.contains(e.target) && !custDropdown?.contains(e.target)) {
+          custDropdown?.classList.add('hidden');
+      }
+  });
+}

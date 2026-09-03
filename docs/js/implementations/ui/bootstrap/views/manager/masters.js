@@ -1,0 +1,286 @@
+// Manager Master Data Management — F-14-10
+
+import '../../components/dup-wizard.js';
+import { findMatch }      from '../../../core_abstractions/ports/cache/master-deduper.js';
+import { listMasters, saveMaster } from '../../../core_abstractions/ports/data/master-repo.js';
+import { listWhere }      from '../../../core_abstractions/ports/data/repo-query.js';
+import { KIND_SHIPMENT }  from '../../../core_abstractions/ports/data/shipment-repo.js';
+import { KIND_PNL_LINE }  from '../../../core_abstractions/ports/manager/commission-calculator.js';
+import { showConfirm }    from '../../helpers/show-confirm.js';
+import { t }              from '../../../../kernel/core_abstractions/i18n/index.js';
+import { mountAgGrid } from '../../../../kernel/core_abstractions/i18n/ag-grid-locale.js';
+import { patchUser }      from '../../../../storage/core_abstractions/user-directory.js';
+
+const MASTERS_RE               = /^\/manager\/masters\/([^/]+)$/;
+const KIND_CUSTOMER            = 'customers';
+const KIND_CARRIER             = 'carriers';
+const KIND_USER                = 'user'; // F-39-01: canonical user-master kind (MASTER_REGISTRY)
+const KIND_MAP                 = { customers: KIND_CUSTOMER, carriers: KIND_CARRIER, users: KIND_USER };
+const USER_KIND                = 'user'; // F-39-01: canonical user-master kind (MASTER_REGISTRY)
+const STATUS_ACTIVE            = 'Active';
+const STATUS_INACTIVE          = 'Inactive';
+const TOAST_AUTODISMISS_MS     = 5_000;
+const OUTLIER_MARGIN_LOW_PCT   = -20;
+const OUTLIER_MARGIN_HIGH_PCT  = 200;
+const STALE_DATA_DAYS          = 90;
+const PREF_META_KEY            = 'preferences';
+const STALE_MS                 = STALE_DATA_DAYS * 86_400_000;
+
+let _onEntity;
+
+function getRepo()     { return window.__vdg_repo; }
+function currentUser() { return window.__vdg_auth?.getCurrentUser?.()?.email || 'manager'; }
+
+function escHtml(s)    { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function toast(message, type = 'success') {
+  window.dispatchEvent(new CustomEvent('vdg:toast', {
+    detail: { type, message, duration: TOAST_AUTODISMISS_MS },
+  }));
+}
+
+// ── User master ──────────────────────────────────────────────────────────────
+
+function mountUserGrid(container, users) {
+  container.innerHTML = '<div class="ag-theme-quartz" style="height:400px"></div>';
+  if (!window.agGrid) return;
+  const cols = [
+    { field: 'name',        headerName: t('masters_hub.col.name'),       flex: 1 },
+    { field: 'email',       headerName: t('masters_hub.col.email'),       flex: 1 },
+    { field: 'role',        headerName: t('masters_hub.col.role'),        width: 90 },
+    { field: 'id',          headerName: t('masters_hub.col.sales_id'),    width: 110 },
+    { field: 'status',      headerName: t('masters_hub.col.status'),      width: 100,
+      cellRenderer: (p) => {
+        const cls = p.value === STATUS_ACTIVE ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500';
+        const span = document.createElement('span');
+        span.className   = `px-2 py-0.5 rounded text-xs font-medium ${cls}`;
+        span.textContent = p.value || '—';
+        return span;
+      } },
+    { field: 'last_login',  headerName: t('masters_hub.col.last_login'),  width: 110 },
+    { headerName: t('common.col.actions'), width: 110, cellRenderer: (p) => {
+        const div = document.createElement('div');
+        div.className = 'flex gap-1';
+        div.innerHTML = `
+          <button class="btn-deactivate px-2 py-0.5 text-xs bg-red-50 text-red-700 rounded hover:bg-red-100"
+            data-id="${p.data.id}" ${p.data.status === STATUS_INACTIVE ? `disabled title="${t('masters_hub.already_inactive')}"` : ''}>${t('masters_hub.action.deactivate')}</button>`;
+        return div;
+      } },
+  ];
+  const grid = mountAgGrid(container.querySelector('.ag-theme-quartz'), {
+    columnDefs: cols, rowData: users, defaultColDef: { sortable: true, resizable: true },
+  });
+  return grid;
+}
+
+// F-46-05: creating a user is /admin/users' job now, and only its. This tab used to also add a
+// sales rep straight into the "user" collection (its own `${USER_ID_PREFIX}-${prefix}` id scheme,
+// a singular `role` field) and hand off to the onboarding wizard's "invite" panel over a Drive
+// link that granted nothing — /admin/users writes the real grant (POST /api/users -> GRANTS_DIR,
+// keyed by email) and is the only screen with a sidebar entry. Deactivating stays here: it flags
+// this master-data row for the data-quality view below, not an access decision.
+async function renderUsers(root) {
+  const repo  = getRepo();
+  const users = repo ? await listMasters(USER_KIND) : [];
+
+  root.innerHTML = `
+    <div class="p-6 space-y-4 max-w-[1600px] mx-auto">
+      <div class="flex items-center justify-between">
+        <div class="text-sm font-semibold text-slate-900">${t('masters_hub.section.user_master')}</div>
+      </div>
+      <div id="user-grid"></div>
+      <div id="dq-section"></div>
+    </div>`;
+
+  mountUserGrid(root.querySelector('#user-grid'), users);
+  renderDataQuality(root.querySelector('#dq-section'), users, [], []);
+
+  // Grid action delegated via container click (agGrid renders detached DOM)
+  root.addEventListener('click', async (e) => {
+    const deactivateBtn = e.target.closest('.btn-deactivate');
+    if (!deactivateBtn || deactivateBtn.disabled) return;
+    const id   = deactivateBtn.dataset.id;
+    const user = users.find((u) => u.id === id);
+    if (!user) return;
+    const ok = await showConfirm({
+      title: t('masters_hub.confirm.deactivate', { name: user.name }),
+      body:  t('masters_hub.deactivate_warning'),
+      confirmLabel: t('masters_hub.action.deactivate'),
+      cancelLabel:  t('common.action.cancel'),
+      destructive:  true,
+    });
+    if (!ok) return;
+    // F-46-05: this used to only flip a status flag on the "user" profile row — the UI said
+    // "They will lose access" while nothing enforced it (the server authorizes from GRANTS_DIR,
+    // never this collection). patchUser(active:false) is the same call /admin/users' Deactivate
+    // makes, so the claim is true now. The profile row's own status still updates too, for this
+    // master-data view's own listing — that part was never the lie, the missing grant write was.
+    try {
+      await patchUser(user.email, { active: false });
+    } catch (err) {
+      toast(`Could not revoke access: ${err.message}`, 'error');
+      return;
+    }
+    const updated = { ...user, status: STATUS_INACTIVE, deactivated_at: new Date().toISOString(), deactivated_by: currentUser() };
+    if (repo) await saveMaster(USER_KIND, updated);
+    toast(`${user.name} deactivated.`);
+    await renderUsers(root);
+  });
+}
+
+// Self-dedup within one master list — F-19-79: dedupeNames()/findMatch() were built to check ONE
+// incoming name against a separate reference list (pnl-commit-orchestrator.js), not to compare a
+// list against itself. Reusing findMatch() with the same list as `existing` self-matches every
+// row at distance 0. Compare each pair once (i<j, self excluded) instead.
+function findDuplicateClusters(entities) {
+  const clusters = [];
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = i + 1; j < entities.length; j++) {
+      const match = findMatch(entities[i].name, [entities[j]]);
+      if (match.status === 'match' || match.status === 'ambiguous') {
+        clusters.push({ a: entities[i].name, b: entities[j].name, score: match.similarity });
+      }
+    }
+  }
+  return clusters;
+}
+
+function renderDataQuality(container, customers, shipments, pnlLines) {
+  const now = Date.now();
+
+  // 1. Duplicates
+  const allClusters = findDuplicateClusters(customers);
+  const dupCount    = allClusters.length;
+
+  // 2. Missing ETD
+  const missingEtd  = shipments.filter((s) => !s.etd && !s.ETD);
+
+  // 3. Outlier margins
+  const outliers    = pnlLines.filter((l) => {
+    const sell  = Number(l.selling_vnd_collect ?? l.SellingVNDCollect ?? 0);
+    const buy   = Number(l.buying_vnd_pay ?? l.BuyingVNDPay ?? 0);
+    if (sell <= 0) return false;
+    const pct   = ((sell - buy) / sell) * 100;
+    return pct < OUTLIER_MARGIN_LOW_PCT || pct > OUTLIER_MARGIN_HIGH_PCT;
+  });
+
+  // 4. Stale data (customers only for this context)
+  const stale = customers.filter((c) => {
+    const upd = c.updated_at || c.created_at;
+    return upd && (now - new Date(upd).getTime()) > STALE_MS;
+  });
+
+  const chip = (count, label) => count === 0
+    ? `<span class="px-2 py-0.5 rounded text-xs bg-emerald-100 text-emerald-700">OK</span>`
+    : `<span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700">${count} ${label}</span>`;
+
+  container.innerHTML = `
+    <div class="mt-5 bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+      <div class="text-sm font-semibold text-slate-900">${t('masters_hub.dq.title')}</div>
+      <div class="space-y-3">
+        <div class="flex items-center gap-3">
+          ${chip(dupCount, t('masters_hub.dq.dup_clusters'))}
+          <span class="text-xs text-slate-600">${t('masters_hub.dq.dup_suggestions')}</span>
+          ${dupCount > 0 ? `<button id="dq-fix-dup" class="text-xs text-blue-600 underline">${t('masters_hub.dq.fix')}</button>` : ''}
+        </div>
+        <div class="flex items-center gap-3">
+          ${chip(missingEtd.length, t('masters_hub.dq.unit_shipment'))}
+          <span class="text-xs text-slate-600">${t('masters_hub.dq.missing_etd')}</span>
+        </div>
+        <div class="flex items-center gap-3">
+          ${chip(outliers.length, t('masters_hub.dq.unit_line'))}
+          <span class="text-xs text-slate-600">${t('masters_hub.dq.outlier_margins', { low: OUTLIER_MARGIN_LOW_PCT, high: OUTLIER_MARGIN_HIGH_PCT })}</span>
+        </div>
+        <div class="flex items-center gap-3">
+          ${chip(stale.length, t('masters_hub.dq.unit_entity'))}
+          <span class="text-xs text-slate-600">${t('masters_hub.dq.stale_data', { days: STALE_DATA_DAYS })}</span>
+        </div>
+      </div>
+    </div>`;
+
+  container.querySelector('#dq-fix-dup')?.addEventListener('click', () => {
+    const wizard = document.createElement('vdg-dup-wizard');
+    wizard.clusters = allClusters.map((c) => ({ a: c.a, b: c.b, score: c.score ?? 0 }));
+    wizard.repo     = getRepo();
+    document.body.appendChild(wizard);
+  });
+}
+
+async function renderCustomersMaster(root) {
+  const repo      = getRepo();
+  // Three reads, same as before — the data-quality panel below needs all three. The two
+  // non-master kinds go through listWhere (the named read every other view uses for them); only
+  // the customer table is master data with a registry entry behind it.
+  const [customers, shipments, pnlLines] = repo
+    ? await Promise.all([listMasters(KIND_CUSTOMER), listWhere(repo, KIND_SHIPMENT), listWhere(repo, KIND_PNL_LINE)])
+    : [[], [], []];
+
+  const managerBar = document.createElement('div');
+  managerBar.className = 'flex gap-2 mb-4';
+  managerBar.innerHTML = `<button id="btn-check-dup" class="px-3 py-1.5 text-xs bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200">${t('masters_hub.dq.check_dups')}</button>`;
+
+  const delegate = document.createElement('div');
+  delegate.id    = 'master-delegate';
+
+  root.innerHTML = '';
+  root.appendChild(managerBar);
+  root.appendChild(delegate);
+
+  managerBar.querySelector('#btn-check-dup').addEventListener('click', () => {
+    const clusters = findDuplicateClusters(customers);
+    const wizard   = document.createElement('vdg-dup-wizard');
+    wizard.clusters = clusters.map((c) => ({ a: c.a, b: c.b, score: c.score ?? 0 }));
+    wizard.repo     = repo;
+    document.body.appendChild(wizard);
+  });
+
+  try {
+    const { render: renderCusts } = await import('../masters-customers.js');
+    await renderCusts(delegate);
+  } catch { delegate.innerHTML = `<div class="p-4 text-slate-400 text-xs">${t('masters_hub.err.customer_load')}</div>`; }
+
+  // Data quality at bottom
+  const dqEl = document.createElement('div');
+  root.appendChild(dqEl);
+  renderDataQuality(dqEl, customers, shipments, pnlLines);
+}
+
+async function renderCarriersMaster(root) {
+  const delegate = document.createElement('div');
+  root.innerHTML = '';
+  root.appendChild(delegate);
+  try {
+    const { render: renderCarriers } = await import('../masters-carriers.js');
+    await renderCarriers(delegate);
+  } catch { delegate.innerHTML = `<div class="p-4 text-slate-400 text-xs">${t('masters_hub.err.carrier_load')}</div>`; }
+}
+
+export async function render(root, param) {
+  if (_onEntity) window.removeEventListener('vdg:entity-changed', _onEntity);
+
+  const route = param?.route || location.hash.slice(1);
+  const match = MASTERS_RE.exec(route);
+  const kind  = match?.[1] || param?.kind || '';
+
+  if (!KIND_MAP[kind]) {
+    root.innerHTML = `<div class="p-6 text-slate-400 text-sm">${t('masters_hub.err.type_not_found')}</div>`;
+    return;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'p-6 max-w-[1600px] mx-auto';
+  root.innerHTML = '';
+  root.appendChild(wrapper);
+
+  if (kind === 'customers')      await renderCustomersMaster(wrapper);
+  else if (kind === 'carriers')  await renderCarriersMaster(wrapper);
+  else                           await renderUsers(wrapper);
+
+  _onEntity = async (e) => {
+    const k = e.detail?.kind;
+    if (k === KIND_USER || k === KIND_CUSTOMER || k === KIND_CARRIER) {
+      await render(root, param);
+    }
+  };
+  window.addEventListener('vdg:entity-changed', _onEntity);
+}
