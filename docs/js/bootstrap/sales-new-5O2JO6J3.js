@@ -12,7 +12,7 @@ import {
   summarizeLineCurrencies,
   vndCellHtml,
   wireLineFx
-} from "./chunk-HP6BHP7N.js";
+} from "./chunk-6YFBIXDJ.js";
 import {
   mountDateHints
 } from "./chunk-OXNK6IJ2.js";
@@ -110,8 +110,9 @@ import {
   rollbackShipmentCreate
 } from "./chunk-CDRBIG2D.js";
 import {
-  getActiveSalesReps
-} from "./chunk-YFN2XPGT.js";
+  getActiveSalesReps,
+  getExcludedNonSalesAccounts
+} from "./chunk-4H4Y6OOD.js";
 import {
   safeMasterLoad
 } from "./chunk-V5A2B6CO.js";
@@ -527,13 +528,16 @@ function custSel(customers, selected, isAutofilled) {
 function repOptionLabel(r) {
   return r.handle ? `${r.name} (${r.handle})` : r.name;
 }
-function repSel(reps, selected, currentUser) {
-  const known = (reps || []).some((r) => r.account === selected);
+function repSel(reps, selected, currentUser, excludedCount = 0) {
+  const list = reps || [];
+  const known = list.some((r) => r.account === selected);
   const legacy = selected && !known && window.__vdg_wasm?.access_is_account(selected) ? `<option value="${selected}" selected>${resolveSalesRepLabel(selected, currentUser, t)}</option>` : "";
-  const opts = (reps || []).map((r) => `<option value="${r.account}"${r.account === selected ? " selected" : ""}>${repOptionLabel(r)}</option>`).join("");
+  const opts = list.map((r) => `<option value="${r.account}"${r.account === selected ? " selected" : ""}>${repOptionLabel(r)}</option>`).join("");
+  const left_out = excludedCount;
+  const hint = left_out ? `<div class="text-[10px] text-slate-500 mt-0.5">${t("sales_new.rep_excluded_hint").replace("{n}", String(left_out))}</div>` : "";
   return `<select name="sales_rep" class="flex-1 border border-slate-200 rounded px-2 py-1 text-xs">
     <option value="">${t("sales_new.select_placeholder")}</option>${legacy}${opts}
-  </select>`;
+  </select>${hint}`;
 }
 function quotePickSel(quoteId) {
   const current = quoteId ? `<option value="${quoteId}" selected>${quoteId}</option>` : "";
@@ -605,7 +609,8 @@ function renderHistoryDatalists(carriers = [], shipments = []) {
     </datalist>
   `;
 }
-function sectionAHtml(draft = {}, customers = [], reps = [], { carriers = [], shipments = [], weightUnits = [] } = {}) {
+function sectionAHtml(draft = {}, customers = [], reps = [], opts = {}) {
+  const { carriers = [], shipments = [], weightUnits = [] } = opts;
   const d = draft;
   const mode = (d.mode || "SEA").toUpperCase();
   const seaHide = mode === "AIR" ? ' class="hidden"' : "";
@@ -665,7 +670,7 @@ function sectionAHtml(draft = {}, customers = [], reps = [], { carriers = [], sh
         <div>
           <label class="block text-[10px] text-slate-500 mb-0.5">${t("sales_new.field.sales_rep")}</label>
           <div class="flex gap-1">
-            ${repSel(reps, d.sales_rep, getCurrentUser())}
+            ${repSel(reps, d.sales_rep, getCurrentUser(), opts.excludedRepCount || 0)}
             <span id="doc-type-badge"
               class="hidden text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 self-center">
             </span>
@@ -2834,6 +2839,7 @@ var AUTOSAVE_DELAY_MS = 1500;
 async function renderForm(root, opts = {}) {
   const {
     customers = [],
+    excludedRepCount = 0,
     salesRepId = "",
     userConfig = null,
     draft = null,
@@ -2873,7 +2879,7 @@ async function renderForm(root, opts = {}) {
       <div id="phase-timeline"></div>
       <form id="shipment-form" class="space-y-4" novalidate>
         <input type="hidden" name="book_currency" value="${d.book_currency}" />
-        ${sectionAHtml(d, customers, reps, { carriers, shipments, weightUnits })}
+        ${sectionAHtml(d, customers, reps, { carriers, shipments, weightUnits, excludedRepCount })}
         ${sectionBHtml(d)}
         ${revenueVisible ? sectionCHtml(d) : ""}
         ${revenueVisible ? sectionDHtml(d, { isManager }) : ""}
@@ -3182,8 +3188,8 @@ function createSubmitGuard() {
 }
 
 // output/web/js.tmp/implementations/ui/bootstrap/views/sales-new-form/pnl-save-validations.js
-function detectFxDeviation({ currency, fxRate, referenceRate }) {
-  return fxDeviation(currency, fxRate, referenceRate);
+function detectFxDeviation({ currency, fxRate, referenceRate, referenceUnreadable }) {
+  return fxDeviation(currency, fxRate, referenceRate, referenceUnreadable === true);
 }
 function buildFxOverrideRecord(lineRef, {
   currency,
@@ -3210,15 +3216,23 @@ function buildFxOverrideRecord(lineRef, {
 
 // output/web/js.tmp/implementations/ui/bootstrap/views/sales-new-form/pnl-fx-deviation-gate.js
 var VND_CURRENCY2 = "VND";
+var REASON_LABEL_KEYS = {
+  non_positive: "sales_new.fx_deviation.reason_non_positive",
+  deviation: "sales_new.fx_deviation.reason_deviation",
+  no_reference: "sales_new.fx_deviation.reason_no_reference"
+};
 async function _resolveReference(fxRepo, fxDate, currency, direction) {
   if (currency === VND_CURRENCY2) return 1;
   if (!fxRepo || !fxDate) return null;
   return getRateForDate(fxRepo, fxDate, currency, direction);
 }
-async function _checkSide(flagged, fxRepo, lineRef, { amount, currency, fxRate, fxDate, direction }) {
+function _ratesUnreadable(fxRepo) {
+  return typeof fxRepo?.hasUnreadableRates === "function" && fxRepo.hasUnreadableRates() === true;
+}
+async function _checkSide(flagged, fxRepo, lineRef, { amount, currency, fxRate, fxDate, direction }, referenceUnreadable) {
   if (!amount || !currency) return;
   const referenceRate = await _resolveReference(fxRepo, fxDate, currency, direction);
-  const { flagged: isFlagged, reason, threshold } = detectFxDeviation({ currency, fxRate, referenceRate });
+  const { flagged: isFlagged, reason, threshold } = detectFxDeviation({ currency, fxRate, referenceRate, referenceUnreadable });
   if (isFlagged) {
     flagged.push({ lineRef, currency, fxRate, referenceRate, fxDate, reason, threshold });
   }
@@ -3227,19 +3241,22 @@ async function findFxDeviations(state = {}, fxRepo) {
   const flagged = [];
   const lines = state.lines || [];
   const commissionLines = state.commission_lines || [];
+  const unreadable = _ratesUnreadable(fxRepo);
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     await _checkSide(
       flagged,
       fxRepo,
       `${i}:buy:${l.desc || ""}`,
-      { amount: l.buy_amt, currency: l.buy_currency, fxRate: l.buy_fx_rate, fxDate: l.buy_fx_date, direction: "Sell" }
+      { amount: l.buy_amt, currency: l.buy_currency, fxRate: l.buy_fx_rate, fxDate: l.buy_fx_date, direction: "Sell" },
+      unreadable
     );
     await _checkSide(
       flagged,
       fxRepo,
       `${i}:sell:${l.desc || ""}`,
-      { amount: l.sell_amt, currency: l.sell_currency, fxRate: l.sell_fx_rate, fxDate: l.sell_fx_date, direction: "Buy" }
+      { amount: l.sell_amt, currency: l.sell_currency, fxRate: l.sell_fx_rate, fxDate: l.sell_fx_date, direction: "Buy" },
+      unreadable
     );
   }
   for (let i = 0; i < commissionLines.length; i++) {
@@ -3248,14 +3265,15 @@ async function findFxDeviations(state = {}, fxRepo) {
       flagged,
       fxRepo,
       `C${i}:${l.kind || ""}`,
-      { amount: l.amount_fx, currency: l.currency, fxRate: l.fx_rate, fxDate: l.fx_date, direction: "Sell" }
+      { amount: l.amount_fx, currency: l.currency, fxRate: l.fx_rate, fxDate: l.fx_date, direction: "Sell" },
+      unreadable
     );
   }
   return flagged;
 }
 function _confirmBody(flagged) {
   return flagged.map((f) => {
-    const reasonLabel = f.reason === "non_positive" ? t("sales_new.fx_deviation.reason_non_positive") : t("sales_new.fx_deviation.reason_deviation");
+    const reasonLabel = REASON_LABEL_KEYS[f.reason] ? t(REASON_LABEL_KEYS[f.reason]) : t("sales_new.fx_deviation.reason_deviation");
     return `${f.lineRef}: ${f.currency} @ ${f.fxRate} \u2014 ${reasonLabel}`;
   }).join("\n");
 }
@@ -3344,13 +3362,14 @@ async function render(root, opts = {}) {
   let jobNo = null;
   let defaultCurrency = null;
   let reps = [];
+  let excludedRepCount = 0;
   let revenueVisible = true;
   let carriers = [];
   let shipments = [];
   let weightUnits = [];
   if (repo) {
     const loadRes = await safeMasterLoad(async () => {
-      const [customerList, carrierList, shipmentList, rawUserConfig, assignment, wsSettings, repList, weightCodes] = await Promise.all([
+      const [customerList, carrierList, shipmentList, rawUserConfig, assignment, wsSettings, repList, excludedReps, weightCodes] = await Promise.all([
         listCustomerMasters().catch(() => []),
         listCarrierMasters().catch(() => []),
         // F-43-08 was a view naming its own kind and getting it wrong ('shipments' resolved to
@@ -3370,6 +3389,9 @@ async function render(root, opts = {}) {
         readSettings(repo),
         // F-41-01: the rep select's options — a master-kind read, same 5-min registry cache.
         getActiveSalesReps(repo).catch(() => []),
+        // B-47-07-04: how many provisioned accounts the registry left out. Failure folds to 0 —
+        // a missing hint is a smaller wrong than a wrong number.
+        getExcludedNonSalesAccounts(repo).catch(() => []),
         // The weight select's options. Which units are weights is a fact of the registry, not of
         // this screen — it used to filter `category === 'weight'` here.
         listWeightUnitCodes().catch(() => [])
@@ -3387,7 +3409,7 @@ async function render(root, opts = {}) {
         } catch {
         }
       }
-      return { customerList, carrierList, shipmentList, userConfig: resolvedUserConfig, jobNo: generatedJobNo, wsSettings, repList, weightCodes };
+      return { customerList, carrierList, shipmentList, userConfig: resolvedUserConfig, jobNo: generatedJobNo, wsSettings, repList, excludedReps, weightCodes };
     }, "sales-new:personalization", PERSONALIZATION_LOAD_TIMEOUT_MS);
     if (loadRes.ok) {
       customers = loadRes.value.customerList;
@@ -3397,6 +3419,7 @@ async function render(root, opts = {}) {
       jobNo = loadRes.value.jobNo;
       defaultCurrency = loadRes.value.wsSettings?.[DEFAULT_CURRENCY_FIELD] ?? null;
       reps = loadRes.value.repList;
+      excludedRepCount = (loadRes.value.excludedReps || []).length;
       weightUnits = loadRes.value.weightCodes || [];
     }
   }
@@ -3457,6 +3480,7 @@ async function render(root, opts = {}) {
   const fxRepo = await _fxRepo();
   await renderForm(formMount, {
     customers,
+    excludedRepCount,
     salesRepId,
     userConfig,
     draft,

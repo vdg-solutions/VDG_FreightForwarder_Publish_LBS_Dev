@@ -42,8 +42,9 @@ import {
 } from "./chunk-2PLULDG2.js";
 import {
   API_BASE,
+  WORKSPACE_NAME,
   activeWorkspaceName
-} from "./chunk-6WYWQ3ZS.js";
+} from "./chunk-QWMTKE7O.js";
 import {
   bindAwbRepo
 } from "./chunk-LEXYJ5I6.js";
@@ -245,7 +246,7 @@ import {
 } from "./chunk-CDRBIG2D.js";
 import {
   bindSalesRegistry
-} from "./chunk-YFN2XPGT.js";
+} from "./chunk-4H4Y6OOD.js";
 import {
   bindMasterRegistry
 } from "./chunk-T2XEYG3A.js";
@@ -617,7 +618,7 @@ var VdgSidebar = class extends LitElement {
       </nav>
       <div class="mt-auto px-4 py-3 border-t border-slate-800 text-[10px] text-slate-500 flex items-center justify-between">
         <span>VDG FreightForwarder</span>
-        <span class="font-mono whitespace-nowrap" title="build 5830cf23">v0.4.69+dev.3 (5830cf23)</span>
+        <span class="font-mono whitespace-nowrap" title="build 6d594379">v0.4.76 (6d594379)</span>
       </div>
     `;
   }
@@ -2351,7 +2352,7 @@ function loginHtml() {
         <!-- Footer -->
         <div class="text-[10px] text-slate-300 text-center">
           ${t("login.footer")}
-          <div class="mt-1 font-mono text-slate-400">v0.4.69+dev.3 (5830cf23)</div>
+          <div class="mt-1 font-mono text-slate-400">v0.4.76 (6d594379)</div>
         </div>
       </div>
     </div>`;
@@ -2780,8 +2781,17 @@ function createPlatform({ repo: repo3 }) {
     records_invalidate_period_cache: (kind, period) => repo3.invalidate_period_cache(kind, period),
     records_delete: (kind, id) => repo3.delete(kind, id),
     // meta lives in the same SQLite store the repo's io port uses (window.__vdg_io, set at boot)
-    records_get_meta: (key) => window.__vdg_io ? window.__vdg_io.cache_get_meta(key) : null,
-    records_put_meta: (key, body) => window.__vdg_io ? window.__vdg_io.cache_put_meta(key, body) : null,
+    // B-24-04-01: these two answered `null` while `__vdg_io` was still being installed, and the
+    // wasm side calls `.then` on whatever comes back -- so the first render of every view after a
+    // page load threw "then on undefined", once per view, on every session.
+    //
+    // A rejected promise, not `Promise.resolve(null)`: the port returns a Result and the callers
+    // already decide what an absent value means (license.rs does `.unwrap_or(Value::Null)`).
+    // Answering "empty" from here would move that decision into the bridge and turn "the IO layer
+    // is not up yet" into "there is no such setting", which is the false zero this project keeps
+    // paying for.
+    records_get_meta: (key) => window.__vdg_io ? window.__vdg_io.cache_get_meta(key) : Promise.reject(new Error(`io not ready: cache_get_meta(${key})`)),
+    records_put_meta: (key, body) => window.__vdg_io ? window.__vdg_io.cache_put_meta(key, body) : Promise.reject(new Error(`io not ready: cache_put_meta(${key})`)),
     // H4-d: the two bespoke stores (month-partitioned, no `kind` records_list can route to) the
     // workspace backup export reaches directly — same repo object, dedicated dump methods
     // (store::bootstrap::wasm_repo_stores::fx_list_all/awb_list_all).
@@ -2994,8 +3004,8 @@ function loadOnce() {
   if (cached) return Promise.resolve(cached);
   if (!inflight) {
     inflight = (async () => {
-      const mod = await import(new URL("pkg/vdg_freight.js?v=5830cf23", document.baseURI).href);
-      const wasmUrl = new URL("pkg/vdg_freight_bg.wasm?v=5830cf23", document.baseURI).href;
+      const mod = await import(new URL("pkg/vdg_freight.js?v=6d594379", document.baseURI).href);
+      const wasmUrl = new URL("pkg/vdg_freight_bg.wasm?v=6d594379", document.baseURI).href;
       await mod.default({ module_or_path: wasmUrl });
       cached = mod;
       window.__vdg_wasm = mod;
@@ -3949,6 +3959,37 @@ if (typeof window !== "undefined") window.__vdg_auth = { getCurrentUser: getCurr
 var identityProvider = { getCurrentUser: getCurrentUser2, signOut: signOut2, wasPreviouslySignedIn: wasPreviouslySignedIn2, rebuildSessionFromStoredToken: rebuildSessionFromStoredToken2 };
 var oauthProvider = { hydrateSessionFromToken: hydrateSessionFromToken2, restampIdTokenExp, initGoogleSignIn: initGoogleSignIn2, renderSignInButton: renderSignInButton3 };
 
+// output/web/js.tmp/implementations/storage/implementations/local/store-scope.js
+var SCOPE_MAX_LEN = 64;
+var SCOPE_SEP = "--";
+var DIGEST_LEN = 8;
+var HEX_RADIX = 16;
+var FNV_OFFSET_BASIS = 2166136261;
+var FNV_PRIME = 16777619;
+function cleaned(part) {
+  return String(part || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function digest(text) {
+  let h = FNV_OFFSET_BASIS;
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, FNV_PRIME) >>> 0;
+  }
+  return h.toString(HEX_RADIX).padStart(DIGEST_LEN, "0");
+}
+function scopeKeyFor(workspace, email) {
+  const account = cleaned(email);
+  if (!account) return "";
+  const space = cleaned(workspace);
+  const full = space ? `${space}${SCOPE_SEP}${account}` : account;
+  if (full.length <= SCOPE_MAX_LEN) return full;
+  const head = full.slice(0, SCOPE_MAX_LEN - DIGEST_LEN - SCOPE_SEP.length);
+  return `${head}${SCOPE_SEP}${digest(full)}`;
+}
+function storeScopeKey(email) {
+  return scopeKeyFor(WORKSPACE_NAME, email);
+}
+
 // output/web/js.tmp/implementations/storage/implementations/local/store-client.js
 var INIT_TIMEOUT_MS = 2e4;
 var OP_TIMEOUT_MS = 5e3;
@@ -3968,11 +4009,7 @@ function _announceLockedIf(errMsg) {
 var BUS_NAME = "vdg-sqlite-bus";
 var LEADER_LOCK = "vdg-sqlite-leader";
 var RID_SEP = "|";
-var SCOPE_MAX_LEN = 64;
 var _scope = null;
-function storeScopeKey(email) {
-  return String(email || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, SCOPE_MAX_LEN);
-}
 function setStoreScope2(email) {
   const key = storeScopeKey(email);
   if (!key) throw new SqliteUnavailableError("store scope requires a signed-in account");
@@ -4367,7 +4404,7 @@ async function tryParamRoute(route) {
   const mastersMatch = MASTERS_RE.exec(basePath);
   if (mastersMatch) {
     const root = freshViewRoot();
-    const mod = await loadView(() => import("./masters-MUNDMTQC.js"), root, basePath);
+    const mod = await loadView(() => import("./masters-VANA7H5P.js"), root, basePath);
     if (!mod) return true;
     await mountView(() => mod.render(root, { kind: mastersMatch[1], route: basePath }), root, basePath);
     return true;
@@ -4375,14 +4412,14 @@ async function tryParamRoute(route) {
   const salesEditMatch = SALES_EDIT_RE.exec(basePath);
   if (salesEditMatch) {
     const root = freshViewRoot();
-    const mod = await loadView(() => import("./sales-new-KQL4DDLY.js"), root, basePath);
+    const mod = await loadView(() => import("./sales-new-5O2JO6J3.js"), root, basePath);
     if (!mod) return true;
     await mountView(() => mod.render(root, { editRef: salesEditMatch[1], mode: "edit" }), root, basePath);
     return true;
   }
   if (SHIPMENT_NEW_RE.test(basePath)) {
     const root = freshViewRoot();
-    const mod = await loadView(() => import("./sales-new-KQL4DDLY.js"), root, basePath);
+    const mod = await loadView(() => import("./sales-new-5O2JO6J3.js"), root, basePath);
     if (!mod) return true;
     const qs = new URLSearchParams(route.split("?")[1] || "");
     const quoteId = qs.get("quote_id");
@@ -4484,7 +4521,7 @@ function initKeyboardShortcuts() {
 }
 
 // output/web/js.tmp/implementations/kernel/core_abstractions/version.js
-var APP_VERSION = "v0.4.69+dev.3 (5830cf23)";
+var APP_VERSION = "v0.4.76 (6d594379)";
 
 // output/web/js.tmp/implementations/ui/core_abstractions/ports/data/merge-resolve.js
 var _impl12 = null;
@@ -4744,18 +4781,18 @@ var VIEWS = {
   // reads ?sales= and ?quote_id= prefills; the static table here has no query hook.
   "/sales/me": () => import("./sales-me-UKBZIL4C.js"),
   "/sales/analytics": () => import("./sales-analytics-MCKIGTJU.js"),
-  "/sales/quote/new": () => import("./sales-quote-new-4KW3HTYJ.js"),
+  "/sales/quote/new": () => import("./sales-quote-new-UAZKGP2S.js"),
   "/sales/quote": () => import("./sales-quote-list-VCJTCXW6.js"),
-  "/masters/customers": () => import("./masters-customers-BEWZFHC4.js"),
+  "/masters/customers": () => import("./masters-customers-H7WYGR5L.js"),
   "/masters/carriers": () => import("./masters-carriers-KPBFC56B.js"),
   "/masters/services": () => import("./masters-services-N4BVLNGW.js"),
   "/help": () => import("./help-O2HJDF2F.js"),
   "/pending-access": () => import("./pending-access-7DMAML24.js"),
   "/background-jobs": () => import("./background-jobs-NY2OVBLZ.js"),
   // Manager Workspace — E-14
-  "/manager/dashboard": () => import("./dashboard-BELKTNKK.js"),
-  "/manager/pipeline": () => import("./pipeline-OT75GWCY.js"),
-  "/manager/approvals": () => import("./approvals-DZEFGRIT.js"),
+  "/manager/dashboard": () => import("./dashboard-5REWW3RG.js"),
+  "/manager/pipeline": () => import("./pipeline-BNL2KN7U.js"),
+  "/manager/approvals": () => import("./approvals-Y26PEFAC.js"),
   "/manager/reports/pnl": () => import("./pnl-report-HBXLLPCO.js"),
   "/manager/finance/cash-flow": () => import("./cash-flow-VHDCCII3.js"),
   "/manager/finance/close-period": () => import("./close-period-VU27GZGX.js"),
@@ -4766,16 +4803,16 @@ var VIEWS = {
   "/manager/sales": () => import("./sales-X4TD2GCN.js"),
   "/manager/finance/commissions": () => import("./commissions-DOBGSUUL.js"),
   "/manager/commission-rules": () => import("./commission-rules-QAH2DJKC.js"),
-  "/manager/exceptions": () => import("./exceptions-HAGQW5SX.js"),
+  "/manager/exceptions": () => import("./exceptions-LBA2XDH3.js"),
   // E-15
   "/manager/errors": () => import("./errors-DZ5DKXRP.js"),
   "/manager/backup": () => import("./backup-PIHICBU4.js"),
   "/manager/users": () => import("./users-RTYASZ4K.js"),
   // E-15 F-15-36
   "/manager/fx-rates": () => import("./fx-rates-PTOBKIXW.js"),
-  "/manager/settings": () => import("./settings-N4GFDE75.js"),
+  "/manager/settings": () => import("./settings-37KQKDXQ.js"),
   // E-16 F-16-02
-  "/manager/awb": () => import("./awb-7X2YDYEK.js"),
+  "/manager/awb": () => import("./awb-OHLWBRU3.js"),
   // E-16 F-16-03
   "/masters/airports": () => import("./airports-26XDZMG6.js"),
   "/masters/flights": () => import("./flights-XK3FL5WU.js"),
@@ -4801,7 +4838,7 @@ var VIEWS = {
   "/accounting/ledger": () => import("./ledger-viewer-ZRNJSIYX.js"),
   // E-23 F-23-05
   "/accounting/reports": () => import("./reports-WDEUTGW7.js"),
-  "/accounting/settings": () => import("./settings-5FRWR5BZ.js"),
+  "/accounting/settings": () => import("./settings-GCI4X4RP.js"),
   // E-24 F-24-04
   "/admin/users": () => import("./users-view-7JGXASVP.js"),
   // E-24 F-24-06
@@ -5695,11 +5732,12 @@ function composeFlows(wasm4) {
       });
       return { match: r.match, expected: r.expected, actual: r.actual, delta: r.delta };
     },
-    fxDeviation: (currency, fxRate, referenceRate) => {
+    fxDeviation: (currency, fxRate, referenceRate, referenceUnreadable) => {
       const r = wasm4.flows_pnl_fx_deviation({
         currency: currency || "",
         fx_rate: Number(fxRate) || 0,
-        reference_rate: referenceRate == null ? null : Number(referenceRate)
+        reference_rate: referenceRate == null ? null : Number(referenceRate),
+        reference_unreadable: referenceUnreadable === true
       });
       return { flagged: r.flagged, reason: r.reason, deviation: r.deviation, threshold: r.threshold };
     }
@@ -5756,6 +5794,14 @@ function composeFlows(wasm4) {
     // F-46-03: the picker's rows come from the server's safe projection, not the local "user"
     // entity cache (nothing ever wrote that kind — the empty-picker bug). The wasm side still
     // owns shaping, colour-hashing and the 5-minute cache.
+    // B-47-07-04, as its own call. Widening getActiveSalesReps' return from an array to an
+    // object would have silently broken seven callers that iterate it — the shape a function
+    // returns is part of its contract, and this list is a different question anyway: not "who
+    // can be picked" but "who was left out, and why".
+    getExcludedNonSalesAccounts: async () => {
+      const users = await listUsers().catch(() => []);
+      return (await wasm4.flows_active_sales_reps({ rows: users || [], force: false })).excluded_no_sales_role || [];
+    },
     getActiveSalesReps: async () => {
       const { users } = await listUsers({ role: ROLE_SALES_REP });
       return (await wasm4.flows_active_sales_reps({ rows: users || [], force: false })).reps;
@@ -6433,7 +6479,7 @@ async function renderView(route) {
   const quoteEditMatch = QUOTE_EDIT_RE.exec(route);
   if (quoteEditMatch) {
     const root2 = _viewRoot();
-    const mod2 = await loadView(() => import("./sales-quote-new-4KW3HTYJ.js"), root2, route);
+    const mod2 = await loadView(() => import("./sales-quote-new-UAZKGP2S.js"), root2, route);
     if (!mod2) return;
     await mountView(() => mod2.render(root2, quoteEditMatch[1]), root2, route);
     return;

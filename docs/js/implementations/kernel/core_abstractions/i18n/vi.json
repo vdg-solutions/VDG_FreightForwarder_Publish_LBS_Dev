@@ -208,6 +208,7 @@
   "sales_new.fx_deviation.cancel": "Hủy",
   "sales_new.fx_deviation.reason_non_positive": "Tỷ giá phải lớn hơn 0",
   "sales_new.fx_deviation.reason_deviation": "Tỷ giá lệch khỏi tỷ giá tham chiếu vượt ngưỡng cho phép",
+  "sales_new.fx_deviation.reason_no_reference": "Không đọc được bảng tỷ giá đã lưu nên tỷ giá này chưa được đối chiếu với tỷ giá tham chiếu",
   "commission.suggest_promote": "Pattern {pattern}: đã dùng {count} lần. Tạo rule?",
   "commission.override_reason_placeholder": "Lý do override (tuỳ chọn)",
   "commission.create_rule": "Tạo rule",
@@ -2125,5 +2126,6 @@
   "ledger.discrepancy": "Lệch (Discrepancy):",
   "masters.delete_failed": "Không xoá được dòng này — bản ghi thiếu khoá hoặc bạn không có quyền.",
   "common.action.ok": "OK",
-  "sales_new.validation.bill_awb_check_digit": "Số vận đơn hàng không sai số kiểm tra: số cuối phải là {n}. (Số cuối = 7 số sê-ri chia 7 lấy dư — IATA Res 600a.)"
+  "sales_new.validation.bill_awb_check_digit": "Số vận đơn hàng không sai số kiểm tra: số cuối phải là {n}. (Số cuối = 7 số sê-ri chia 7 lấy dư — IATA Res 600a.)",
+  "sales_new.rep_excluded_hint": "{n} tài khoản khác không hiện ở đây vì chưa có vai Sales."
 }

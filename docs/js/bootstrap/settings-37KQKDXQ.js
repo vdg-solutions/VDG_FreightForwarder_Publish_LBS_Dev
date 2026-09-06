@@ -1,6 +1,6 @@
 import {
   activeWorkspaceName
-} from "./chunk-6WYWQ3ZS.js";
+} from "./chunk-QWMTKE7O.js";
 import {
   SECOND_EYES_FIELD,
   loadWorkspaceSettings,
